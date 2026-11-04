@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08090a">
+  <title>Studio — Selected Work</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html { background: #08090a; scroll-behavior: smooth; }
+    body { margin: 0; color: #f4f2ed; background: #08090a; }
+    .sequence { height: 900vh; position: relative; }
+    .stage { position: sticky; top: 0; height: 100svh; min-height: 480px; overflow: hidden; isolation: isolate; background: #08090a; }
+    #sequence-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+    #loader { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; background: #08090a; color: #f4f2ed; font-size: 11px; letter-spacing: .18em; transition: opacity .45s ease, visibility .45s ease; }
+    #loader.hidden { opacity: 0; visibility: hidden; }
+    @media (max-width: 600px) { .sequence { height: 700vh; } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  </style>
+</head>
+<body>
+  <div id="loader" role="status" aria-live="polite">LOADING 0%</div>
+  <main>
+    <section class="sequence" id="sequence" aria-label="Scroll through the project">
+      <div class="stage">
+        <canvas id="sequence-canvas" aria-label="Animated project visual"></canvas>
+      </div>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const FRAME_COUNT = 990;
+      const FRAME_FOLDER = "std2";
+      const canvas = document.getElementById("sequence-canvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const section = document.getElementById("sequence");
+      const loader = document.getElementById("loader");
+      const frames = new Array(FRAME_COUNT);
+      let targetFrame = 0;
+      let displayedFrame = -1;
+      let dpr = 1;
+      let initialLoaded = 0;
+      let animationRequested = false;
+
+      // Files are named exactly: std2/ab (1).jpg through std2/ab (990).jpg.
+      function getFrame(index) {
+        if (frames[index]) return frames[index];
+        const image = new Image();
+        frames[index] = image;
+        image.onload = () => {
+          if (index < 24) {
+            initialLoaded++;
+            loader.textContent = `LOADING ${Math.round(initialLoaded / 24 * 100)}%`;
+            if (initialLoaded >= 24) loader.classList.add("hidden");
+          }
+          requestDraw();
+        };
+        image.onerror = () => {
+          if (index < 24) {
+            initialLoaded++;
+            loader.textContent = `LOADING ${Math.round(initialLoaded / 24 * 100)}%`;
+            if (initialLoaded >= 24) loader.classList.add("hidden");
+          }
+        };
+        image.src = `${FRAME_FOLDER}/ab%20(${index + 1}).jpg`;
+        return image;
+      }
+
+      function draw(index) {
+        const image = frames[index];
+        if (!image || !image.complete || !image.naturalWidth) return false;
+        const width = canvas.width;
+        const height = canvas.height;
+        const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
+        const drawWidth = image.naturalWidth * scale;
+        const drawHeight = image.naturalHeight * scale;
+        ctx.fillStyle = "#08090a";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+        displayedFrame = index;
+        return true;
+      }
+
+      function requestDraw() {
+        if (animationRequested) return;
+        animationRequested = true;
+        requestAnimationFrame(() => {
+          animationRequested = false;
+          const next = Math.round(targetFrame);
+          if (next === displayedFrame) return;
+          getFrame(next);
+          if (!draw(next)) {
+            // Hold the latest available image while the requested frame loads.
+            let nearby = next;
+            while (nearby > 0 && (!frames[nearby] || !frames[nearby].complete || !frames[nearby].naturalWidth)) nearby--;
+            if (frames[nearby]?.naturalWidth) draw(nearby);
+          }
+        });
+      }
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(canvas.clientWidth * dpr);
+        canvas.height = Math.round(canvas.clientHeight * dpr);
+        displayedFrame = -1;
+        requestDraw();
+      }
+
+      function updateScroll() {
+        const rect = section.getBoundingClientRect();
+        const distance = section.offsetHeight - window.innerHeight;
+        const progress = distance > 0 ? Math.min(1, Math.max(0, -rect.top / distance)) : 0;
+        targetFrame = progress * (FRAME_COUNT - 1);
+        // Fetch a small window ahead of the scroll position for responsive playback.
+        const center = Math.round(targetFrame);
+        for (let offset = 0; offset <= 8; offset++) {
+          if (center + offset < FRAME_COUNT) getFrame(center + offset);
+          if (offset && center - offset >= 0) getFrame(center - offset);
+        }
+        requestDraw();
+      }
+
+      // Prime the opening frames; continue loading the rest in small batches.
+      for (let i = 0; i < 24; i++) getFrame(i);
+      let preloadIndex = 24;
+      function preloadBatch() {
+        const stop = Math.min(preloadIndex + 12, FRAME_COUNT);
+        while (preloadIndex < stop) getFrame(preloadIndex++);
+        if (preloadIndex < FRAME_COUNT) setTimeout(preloadBatch, 60);
+      }
+      preloadBatch();
+      window.addEventListener("resize", resize, { passive: true });
+      window.addEventListener("scroll", updateScroll, { passive: true });
+      resize();
+      updateScroll();
+    })();
+  </script>
+</body>
+</html>
