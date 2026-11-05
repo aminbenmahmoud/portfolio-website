@@ -10,12 +10,12 @@
     * { box-sizing: border-box; }
     html { background: #08090a; scroll-behavior: smooth; }
     body { margin: 0; color: #f4f2ed; background: #08090a; }
-    .sequence { height: 900vh; position: relative; }
+    .sequence { height: 1200vh; position: relative; }
     .stage { position: sticky; top: 0; height: 100svh; min-height: 480px; overflow: hidden; isolation: isolate; background: #08090a; }
     #sequence-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
     #loader { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; background: #08090a; color: #f4f2ed; font-size: 11px; letter-spacing: .18em; transition: opacity .45s ease, visibility .45s ease; }
     #loader.hidden { opacity: 0; visibility: hidden; }
-    @media (max-width: 600px) { .sequence { height: 700vh; } }
+    @media (max-width: 600px) { .sequence { height: 900vh; } }
     @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   </style>
 </head>
@@ -32,15 +32,21 @@
     (() => {
       const FRAME_COUNT = 990;
       const FRAME_FOLDER = "std2";
+      const CACHE_BEHIND = 8;
+      const MAX_CACHE_AHEAD = 18;
+      const MIN_CACHE_AHEAD = 3;
+      const MAX_FALLBACK_DISTANCE = 8;
       const canvas = document.getElementById("sequence-canvas");
       const ctx = canvas.getContext("2d", { alpha: false });
       const section = document.getElementById("sequence");
       const loader = document.getElementById("loader");
       const frames = new Array(FRAME_COUNT);
       let targetFrame = 0;
-      let displayedFrame = -1;
+      let scrollDirection = 1;
+      let lastFrameCenter = 0;
+      let lastFrameCenterTime = performance.now();
+      let scrollFrameSpeed = 0;
       let dpr = 1;
-      let initialLoaded = 0;
       let animationRequested = false;
 
       // Frames use the existing std2/ab (1).jpg through std2/ab (990).jpg files.
@@ -48,28 +54,43 @@
         if (frames[index]) return frames[index];
         const image = new Image();
         frames[index] = image;
+        image.decoding = "async";
         image.onload = () => {
-          if (index < 24) {
-            initialLoaded++;
-            loader.textContent = `LOADING ${Math.round(initialLoaded / 24 * 100)}%`;
-            if (initialLoaded >= 24) loader.classList.add("hidden");
-          }
           requestDraw();
         };
-        image.onerror = () => {
-          if (index < 24) {
-            initialLoaded++;
-            loader.textContent = `LOADING ${Math.round(initialLoaded / 24 * 100)}%`;
-            if (initialLoaded >= 24) loader.classList.add("hidden");
-          }
-        };
+        image.onerror = () => console.error("Failed to load animation frame:", image.src);
+        image.fetchPriority = "low";
         image.src = `${FRAME_FOLDER}/ab%20(${index + 1}).jpg`;
         return image;
       }
 
-      function draw(index) {
-        const image = frames[index];
-        if (!image || !image.complete || !image.naturalWidth) return false;
+      function draw(framePosition) {
+        const lowerIndex = Math.floor(framePosition);
+        const upperIndex = Math.min(lowerIndex + 1, FRAME_COUNT - 1);
+        const lower = frames[lowerIndex];
+        const upper = frames[upperIndex];
+        const lowerReady = Boolean(lower?.complete && lower.naturalWidth);
+        const upperReady = Boolean(upper?.complete && upper.naturalWidth);
+        let image = lowerReady ? lower : upperReady ? upper : null;
+
+        if (!image) {
+          for (let distance = 1; distance <= MAX_FALLBACK_DISTANCE; distance++) {
+            const candidates = scrollDirection > 0
+              ? [upperIndex + distance, lowerIndex - distance]
+              : [lowerIndex - distance, upperIndex + distance];
+            for (const candidateIndex of candidates) {
+              if (candidateIndex < 0 || candidateIndex >= FRAME_COUNT) continue;
+              const candidate = frames[candidateIndex];
+              if (candidate?.complete && candidate.naturalWidth) {
+                image = candidate;
+                break;
+              }
+            }
+            if (image) break;
+          }
+        }
+
+        if (!image) return false;
         const width = canvas.width;
         const height = canvas.height;
         const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
@@ -78,7 +99,12 @@
         ctx.fillStyle = "#08090a";
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
-        displayedFrame = index;
+        if (lowerReady && upperReady && lowerIndex !== upperIndex) {
+          ctx.globalAlpha = framePosition - lowerIndex;
+          ctx.drawImage(upper, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+          ctx.globalAlpha = 1;
+        }
+        loader.classList.add("hidden");
         return true;
       }
 
@@ -87,15 +113,7 @@
         animationRequested = true;
         requestAnimationFrame(() => {
           animationRequested = false;
-          const next = Math.round(targetFrame);
-          if (next === displayedFrame) return;
-          getFrame(next);
-          if (!draw(next)) {
-            // Hold the latest available image while the requested frame loads.
-            let nearby = next;
-            while (nearby > 0 && (!frames[nearby] || !frames[nearby].complete || !frames[nearby].naturalWidth)) nearby--;
-            if (frames[nearby]?.naturalWidth) draw(nearby);
-          }
+          draw(targetFrame);
         });
       }
 
@@ -103,8 +121,37 @@
         dpr = Math.min(window.devicePixelRatio || 1, 2);
         canvas.width = Math.round(canvas.clientWidth * dpr);
         canvas.height = Math.round(canvas.clientHeight * dpr);
-        displayedFrame = -1;
         requestDraw();
+      }
+
+      function pruneFrames(minIndex, maxIndex) {
+        for (let index = 0; index < FRAME_COUNT; index++) {
+          const image = frames[index];
+          if (!image || (index >= minIndex && index <= maxIndex)) continue;
+          image.onload = null;
+          image.onerror = null;
+          if (!image.complete) image.src = "data:,";
+          frames[index] = null;
+        }
+      }
+
+      function requestFrameWindow(center, ahead) {
+        const behind = CACHE_BEHIND;
+        const minIndex = Math.max(0, center - (scrollDirection > 0 ? behind : ahead));
+        const maxIndex = Math.min(FRAME_COUNT - 1, center + (scrollDirection > 0 ? ahead : behind));
+        pruneFrames(minIndex, maxIndex);
+        getFrame(center).fetchPriority = "high";
+        for (let offset = 1; offset <= ahead; offset++) {
+          const index = center + scrollDirection * offset;
+          if (index >= 0 && index < FRAME_COUNT) {
+            const image = getFrame(index);
+            image.fetchPriority = offset <= 4 ? "auto" : "low";
+          }
+        }
+        for (let offset = 1; offset <= behind; offset++) {
+          const index = center - scrollDirection * offset;
+          if (index >= 0 && index < FRAME_COUNT) getFrame(index);
+        }
       }
 
       function updateScroll() {
@@ -112,24 +159,23 @@
         const distance = section.offsetHeight - window.innerHeight;
         const progress = distance > 0 ? Math.min(1, Math.max(0, -rect.top / distance)) : 0;
         targetFrame = progress * (FRAME_COUNT - 1);
-        // Fetch a small window ahead of the scroll position for responsive playback.
         const center = Math.round(targetFrame);
-        for (let offset = 0; offset <= 8; offset++) {
-          if (center + offset < FRAME_COUNT) getFrame(center + offset);
-          if (offset && center - offset >= 0) getFrame(center - offset);
+        if (center !== lastFrameCenter) {
+          const now = performance.now();
+          const elapsed = Math.max(now - lastFrameCenterTime, 16);
+          const measuredSpeed = Math.abs(center - lastFrameCenter) * 1000 / elapsed;
+          scrollFrameSpeed = Math.min(1000, scrollFrameSpeed * 0.5 + measuredSpeed * 0.5);
+          scrollDirection = center > lastFrameCenter ? 1 : -1;
+          lastFrameCenter = center;
+          lastFrameCenterTime = now;
         }
+        const ahead = Math.min(
+          MAX_CACHE_AHEAD,
+          Math.max(MIN_CACHE_AHEAD, Math.ceil(scrollFrameSpeed * 0.06))
+        );
+        requestFrameWindow(center, ahead);
         requestDraw();
       }
-
-      // Prime the opening frames; continue loading the rest in small batches.
-      for (let i = 0; i < 24; i++) getFrame(i);
-      let preloadIndex = 24;
-      function preloadBatch() {
-        const stop = Math.min(preloadIndex + 12, FRAME_COUNT);
-        while (preloadIndex < stop) getFrame(preloadIndex++);
-        if (preloadIndex < FRAME_COUNT) setTimeout(preloadBatch, 60);
-      }
-      preloadBatch();
       window.addEventListener("resize", resize, { passive: true });
       window.addEventListener("scroll", updateScroll, { passive: true });
       resize();
@@ -138,4 +184,3 @@
   </script>
 </body>
 </html>
-
