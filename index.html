@@ -35,12 +35,15 @@
       const CACHE_BEHIND = 8;
       const MAX_CACHE_AHEAD = 18;
       const MIN_CACHE_AHEAD = 3;
+      const MAX_CONCURRENT_LOADS = 4;
       const MAX_FALLBACK_DISTANCE = 8;
       const canvas = document.getElementById("sequence-canvas");
       const ctx = canvas.getContext("2d", { alpha: false });
       const section = document.getElementById("sequence");
       const loader = document.getElementById("loader");
       const frames = new Array(FRAME_COUNT);
+      const loadingFrames = new Set();
+      let wantedFrames = new Set();
       let targetFrame = 0;
       let scrollDirection = 1;
       let lastFrameCenter = 0;
@@ -50,18 +53,30 @@
       let animationRequested = false;
 
       // Frames use the existing std2/ab (1).jpg through std2/ab (990).jpg files.
-      function getFrame(index) {
-        if (frames[index]) return frames[index];
-        const image = new Image();
-        frames[index] = image;
-        image.decoding = "async";
-        image.onload = () => {
-          requestDraw();
-        };
-        image.onerror = () => console.error("Failed to load animation frame:", image.src);
-        image.fetchPriority = "low";
-        image.src = `${FRAME_FOLDER}/ab%20(${index + 1}).jpg`;
-        return image;
+      function pumpFrameLoads() {
+        for (const index of wantedFrames) {
+          if (loadingFrames.size >= MAX_CONCURRENT_LOADS) break;
+          if (frames[index] || loadingFrames.has(index)) continue;
+
+          const image = new Image();
+          frames[index] = image;
+          loadingFrames.add(index);
+          image.decoding = "async";
+          image.fetchPriority = index === Math.round(targetFrame) ? "high" : "low";
+          image.onload = () => {
+            loadingFrames.delete(index);
+            if (!wantedFrames.has(index)) frames[index] = null;
+            requestDraw();
+            pumpFrameLoads();
+          };
+          image.onerror = () => {
+            loadingFrames.delete(index);
+            frames[index] = null;
+            console.error("Failed to load animation frame:", image.src);
+            pumpFrameLoads();
+          };
+          image.src = `${FRAME_FOLDER}/ab%20(${index + 1}).jpg`;
+        }
       }
 
       function draw(framePosition) {
@@ -109,40 +124,30 @@
       }
 
       function resize() {
-        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        dpr = Math.min(window.devicePixelRatio || 1, 1.5);
         canvas.width = Math.round(canvas.clientWidth * dpr);
         canvas.height = Math.round(canvas.clientHeight * dpr);
         requestDraw();
       }
 
-      function pruneFrames(minIndex, maxIndex) {
-        for (let index = 0; index < FRAME_COUNT; index++) {
-          const image = frames[index];
-          if (!image || (index >= minIndex && index <= maxIndex)) continue;
-          image.onload = null;
-          image.onerror = null;
-          if (!image.complete) image.src = "data:,";
-          frames[index] = null;
-        }
-      }
-
       function requestFrameWindow(center, ahead) {
-        const behind = CACHE_BEHIND;
-        const minIndex = Math.max(0, center - (scrollDirection > 0 ? behind : ahead));
-        const maxIndex = Math.min(FRAME_COUNT - 1, center + (scrollDirection > 0 ? ahead : behind));
-        pruneFrames(minIndex, maxIndex);
-        getFrame(center).fetchPriority = "high";
+        const nextWantedFrames = new Set([center]);
+        const currentFrame = frames[center];
+        if (currentFrame && loadingFrames.has(center)) currentFrame.fetchPriority = "high";
         for (let offset = 1; offset <= ahead; offset++) {
           const index = center + scrollDirection * offset;
-          if (index >= 0 && index < FRAME_COUNT) {
-            const image = getFrame(index);
-            image.fetchPriority = offset <= 4 ? "auto" : "low";
-          }
+          if (index >= 0 && index < FRAME_COUNT) nextWantedFrames.add(index);
         }
-        for (let offset = 1; offset <= behind; offset++) {
+        for (let offset = 1; offset <= CACHE_BEHIND; offset++) {
           const index = center - scrollDirection * offset;
-          if (index >= 0 && index < FRAME_COUNT) getFrame(index);
+          if (index >= 0 && index < FRAME_COUNT) nextWantedFrames.add(index);
         }
+
+        for (const index of wantedFrames) {
+          if (!nextWantedFrames.has(index) && !loadingFrames.has(index)) frames[index] = null;
+        }
+        wantedFrames = nextWantedFrames;
+        pumpFrameLoads();
       }
 
       function updateScroll() {
