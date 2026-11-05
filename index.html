@@ -65,19 +65,15 @@
       }
 
       function draw(framePosition) {
-        const lowerIndex = Math.floor(framePosition);
-        const upperIndex = Math.min(lowerIndex + 1, FRAME_COUNT - 1);
-        const lower = frames[lowerIndex];
-        const upper = frames[upperIndex];
-        const lowerReady = Boolean(lower?.complete && lower.naturalWidth);
-        const upperReady = Boolean(upper?.complete && upper.naturalWidth);
-        let image = lowerReady ? lower : upperReady ? upper : null;
+        const frameIndex = Math.round(framePosition);
+        let image = frames[frameIndex];
+        if (!image?.complete || !image.naturalWidth) image = null;
 
         if (!image) {
           for (let distance = 1; distance <= MAX_FALLBACK_DISTANCE; distance++) {
             const candidates = scrollDirection > 0
-              ? [upperIndex + distance, lowerIndex - distance]
-              : [lowerIndex - distance, upperIndex + distance];
+              ? [frameIndex + distance, frameIndex - distance]
+              : [frameIndex - distance, frameIndex + distance];
             for (const candidateIndex of candidates) {
               if (candidateIndex < 0 || candidateIndex >= FRAME_COUNT) continue;
               const candidate = frames[candidateIndex];
@@ -99,11 +95,6 @@
         ctx.fillStyle = "#08090a";
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
-        if (lowerReady && upperReady && lowerIndex !== upperIndex) {
-          ctx.globalAlpha = framePosition - lowerIndex;
-          ctx.drawImage(upper, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
-          ctx.globalAlpha = 1;
-        }
         loader.classList.add("hidden");
         return true;
       }
