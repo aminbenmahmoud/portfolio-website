@@ -30,8 +30,17 @@
   </main>
   <script>
     (() => {
-      const FRAME_COUNT = 990;
-      const FRAME_FOLDER = "std2";
+      const mobileViewport = window.matchMedia("(max-width: 600px)");
+      const desktopFrames = {
+        folder: "std2",
+        prefix: "ab",
+        numbers: Array.from({ length: 990 }, (_, index) => index + 1)
+      };
+      const mobileFrames = {
+        folder: "std-mobile",
+        prefix: "ac",
+        numbers: [1, ...Array.from({ length: 1132 }, (_, index) => index + 301)]
+      };
       const CACHE_BEHIND = 8;
       const MAX_CACHE_AHEAD = 18;
       const MIN_CACHE_AHEAD = 3;
@@ -41,8 +50,9 @@
       const ctx = canvas.getContext("2d", { alpha: false });
       const section = document.getElementById("sequence");
       const loader = document.getElementById("loader");
-      const frames = new Array(FRAME_COUNT);
-      const loadingFrames = new Set();
+      let frameConfig = mobileViewport.matches ? mobileFrames : desktopFrames;
+      let frames = new Map();
+      let loadingFrames = new Map();
       let wantedFrames = new Set();
       let targetFrame = 0;
       let scrollDirection = 1;
@@ -52,36 +62,54 @@
       let dpr = 1;
       let animationRequested = false;
 
-      // Frames use the existing std2/ab (1).jpg through std2/ab (990).jpg files.
+      function getFramePath(index) {
+        return `${frameConfig.folder}/${frameConfig.prefix} (${frameConfig.numbers[index]}).jpg`;
+      }
+
+      function syncFrameConfig() {
+        const nextConfig = mobileViewport.matches ? mobileFrames : desktopFrames;
+        if (nextConfig === frameConfig) return;
+        frameConfig = nextConfig;
+        frames = new Map();
+        loadingFrames = new Map();
+        wantedFrames = new Set();
+        targetFrame = 0;
+        scrollDirection = 1;
+        lastFrameCenter = 0;
+        lastFrameCenterTime = performance.now();
+        scrollFrameSpeed = 0;
+      }
+
       function pumpFrameLoads() {
-        for (const index of wantedFrames) {
+        for (const framePath of wantedFrames) {
           if (loadingFrames.size >= MAX_CONCURRENT_LOADS) break;
-          if (frames[index] || loadingFrames.has(index)) continue;
+          if (frames.has(framePath) || loadingFrames.has(framePath)) continue;
 
           const image = new Image();
-          frames[index] = image;
-          loadingFrames.add(index);
+          loadingFrames.set(framePath, image);
           image.decoding = "async";
-          image.fetchPriority = index === Math.round(targetFrame) ? "high" : "low";
+          image.fetchPriority = framePath === getFramePath(Math.round(targetFrame)) ? "high" : "low";
           image.onload = () => {
-            loadingFrames.delete(index);
-            if (!wantedFrames.has(index)) frames[index] = null;
+            if (loadingFrames.get(framePath) !== image) return;
+            loadingFrames.delete(framePath);
+            if (wantedFrames.has(framePath)) frames.set(framePath, image);
             requestDraw();
             pumpFrameLoads();
           };
           image.onerror = () => {
-            loadingFrames.delete(index);
-            frames[index] = null;
+            if (loadingFrames.get(framePath) !== image) return;
+            loadingFrames.delete(framePath);
+            frames.delete(framePath);
             console.error("Failed to load animation frame:", image.src);
             pumpFrameLoads();
           };
-          image.src = `${FRAME_FOLDER}/ab%20(${index + 1}).jpg`;
+          image.src = framePath.replace(" ", "%20");
         }
       }
 
       function draw(framePosition) {
         const frameIndex = Math.round(framePosition);
-        let image = frames[frameIndex];
+        let image = frames.get(getFramePath(frameIndex));
         if (!image?.complete || !image.naturalWidth) image = null;
 
         if (!image) {
@@ -90,8 +118,8 @@
               ? [frameIndex + distance, frameIndex - distance]
               : [frameIndex - distance, frameIndex + distance];
             for (const candidateIndex of candidates) {
-              if (candidateIndex < 0 || candidateIndex >= FRAME_COUNT) continue;
-              const candidate = frames[candidateIndex];
+              if (candidateIndex < 0 || candidateIndex >= frameConfig.numbers.length) continue;
+              const candidate = frames.get(getFramePath(candidateIndex));
               if (candidate?.complete && candidate.naturalWidth) {
                 image = candidate;
                 break;
@@ -124,37 +152,39 @@
       }
 
       function resize() {
+        syncFrameConfig();
         dpr = Math.min(window.devicePixelRatio || 1, 1.5);
         canvas.width = Math.round(canvas.clientWidth * dpr);
         canvas.height = Math.round(canvas.clientHeight * dpr);
-        requestDraw();
+        updateScroll();
       }
 
       function requestFrameWindow(center, ahead) {
-        const nextWantedFrames = new Set([center]);
-        const currentFrame = frames[center];
-        if (currentFrame && loadingFrames.has(center)) currentFrame.fetchPriority = "high";
+        const nextWantedFrames = new Set([getFramePath(center)]);
+        const currentFrame = loadingFrames.get(getFramePath(center));
+        if (currentFrame) currentFrame.fetchPriority = "high";
         for (let offset = 1; offset <= ahead; offset++) {
           const index = center + scrollDirection * offset;
-          if (index >= 0 && index < FRAME_COUNT) nextWantedFrames.add(index);
+          if (index >= 0 && index < frameConfig.numbers.length) nextWantedFrames.add(getFramePath(index));
         }
         for (let offset = 1; offset <= CACHE_BEHIND; offset++) {
           const index = center - scrollDirection * offset;
-          if (index >= 0 && index < FRAME_COUNT) nextWantedFrames.add(index);
+          if (index >= 0 && index < frameConfig.numbers.length) nextWantedFrames.add(getFramePath(index));
         }
 
-        for (const index of wantedFrames) {
-          if (!nextWantedFrames.has(index) && !loadingFrames.has(index)) frames[index] = null;
+        for (const framePath of wantedFrames) {
+          if (!nextWantedFrames.has(framePath) && !loadingFrames.has(framePath)) frames.delete(framePath);
         }
         wantedFrames = nextWantedFrames;
         pumpFrameLoads();
       }
 
       function updateScroll() {
+        syncFrameConfig();
         const rect = section.getBoundingClientRect();
         const distance = section.offsetHeight - window.innerHeight;
         const progress = distance > 0 ? Math.min(1, Math.max(0, -rect.top / distance)) : 0;
-        targetFrame = progress * (FRAME_COUNT - 1);
+        targetFrame = progress * (frameConfig.numbers.length - 1);
         const center = Math.round(targetFrame);
         if (center !== lastFrameCenter) {
           const now = performance.now();
@@ -175,7 +205,6 @@
       window.addEventListener("resize", resize, { passive: true });
       window.addEventListener("scroll", updateScroll, { passive: true });
       resize();
-      updateScroll();
     })();
   </script>
 </body>
